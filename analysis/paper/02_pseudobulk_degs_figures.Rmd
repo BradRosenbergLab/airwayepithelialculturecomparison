@@ -1,0 +1,1672 @@
+---
+title: "Comparison of primary and immortalized well-differentiated human airway epithelium cultures at air-liquid interface by single cell RNA-Sequencing"
+subtitle: "Manuscript figures"
+author: 
+  - "Rachel A. Prescott"
+  - "Alec P. Pankow"
+  - "Maren de Vries"
+  - "Keaton Crosse"
+  - "Roosheel S. Patel"
+  - "Mark Alu"
+  - "Cindy Loomis"
+  - "Victor Torres"
+  - "Sergei Koralov"
+  - "Ellie Ivanova"
+  - "Meike Dittmann"
+  - "Brad R. Rosenberg"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_float: true
+    fig_caption: yes
+    df_print: paged
+    code_folding: hide
+    pandoc_args:
+    - --lua-filter=../templates/scholarly-metadata.lua
+    - --lua-filter=../templates/author-info-blocks.lua
+bibliography: references.bib
+link-citations: yes
+institute:
+- Sinai: Icahn School of Medicine at Mount Sinai, Department of Microbiology
+---
+
+This notebook contains R code for generating scRNA-Seq figure panels for our draft manuscript "Comparison of primary and immortalized well-differentiated human airway epithelium cultures at air-liquid interface by single cell RNA-Sequencing". This includes Fig. 2 a-f, Fig. 3 a-f, Figure S2 a-b, and Figure S3 a-b. 
+
+Prior to running this notebook, ensure that you have run the previous two notebooks `00_qc_demux_integrate.Rmd`, and `01_annotate_clusters.Rmd` and generated the saved Seurat obejct `analysis/data/01-integrated-by-sample-anno.rds`.
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(
+  dev = "png",
+  collapse = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  results = "show", #
+  echo = TRUE,
+  eval = TRUE,
+  comment = "#>",
+  fig.path = "../figures/",
+  dpi = 300,
+  cache = F, # look into turning on
+  cache.lazy = FALSE
+)
+```
+
+```{r}
+# imports
+library(clustree)
+library(condiments)
+library(ComplexHeatmap)
+library(ComplexUpset)
+library(DESeq2)
+library(dendextend)
+library(dplyr)
+library(edgeR)
+library(forcats)
+library(future)
+library(ggplot2)
+library(ggsignif)
+library(ggridges)
+library(ggsci)
+library(glmGamPoi)
+library(here)
+library(kableExtra)
+library(knitr)
+library(patchwork)
+library(pheatmap)
+library(purrr)
+library(RColorBrewer)
+library(readr)
+library(scDblFinder)
+library(scuttle)
+library(scran)
+library(sctransform)
+library(Seurat)
+library(SeuratObject)
+library(slingshot)
+library(stringr)
+library(tidyr)
+library(tradeSeq)
+library(writexl)
+
+# import project functions
+source(here::here("R/functions.R"))
+source(here("R/CustomUMAP.R"))
+
+# set random seed
+RNGseed <- 3
+
+# read in Seurat object from notebook 01
+hae.combined <- readRDS(here("analysis/data/01-integrated-by-sample-anno.rds"))
+
+# flip UMAP2 for display... places basal cells on bottom
+hae.combined@reductions$umap@cell.embeddings[, 2] <- -1 * hae.combined@reductions$umap@cell.embeddings[, 2]
+```
+
+## Figure 2. Cell population annotation, frequency and distribution
+
+### A: UMAP projection by minor cluster 
+
+The three secretory clusters are named by their predominant mucin expression: 
+
+- Secretory I: MUC5AC<sup>LO</sup> MUC5B<sup>LO</sup>
+- Secretory II: MUC5AC<sup>HI</sup> MUC5B<sup>LO</sup>
+- Secretory III: MUC5AC<sup>LO</sup> MUC5B<sup>HI</sup>
+
+```{r umap1, fig.height=6, fig.width = 12}
+# code for setting labels for display in manuscript figures...
+x <- hae.combined$cluster_minor
+hae.combined$cluster_pretty <- case_when(
+  x == "secretory 1" ~ "secretory I",
+  x == "secretory 2" ~ "secretory II",
+  x == "secretory 3" ~ "secretory III",
+  T ~ as.character(x)
+) %>%
+  factor(
+    levels = c(
+      # insert levels here..
+      "basal",
+      "basal proliferating",
+      "suprabasal",
+      "intermediate",
+      "secretory I",
+      "secretory II",
+      "secretory III",
+      "deuterosomal",
+      "ciliated",
+      "tuft-like",
+      "ionocyte",
+      "neuroendocrine"
+    )
+  )
+
+hae.combined$SampleGroup <- case_when(
+  hae.combined$SampleGroup == "NHBE" ~ "primary",
+  hae.combined$SampleGroup == "BCI" ~ "BCi",
+  T ~ as.character(hae.combined$SampleGroup)
+) %>%
+  factor(
+    levels = c(
+      # insert levels here..
+      "primary",
+      "BCi"
+    )
+  )
+
+hae.combined$SampleID <- case_when(
+  hae.combined$SampleID == "NHBE_1" ~ "primary_1",
+  hae.combined$SampleID == "NHBE_2" ~ "primary_2",
+  hae.combined$SampleID == "NHBE_3" ~ "primary_3",
+  hae.combined$SampleID == "BCI_1" ~ "BCi_1",
+  hae.combined$SampleID == "BCI_2" ~ "BCi_2",
+  hae.combined$SampleID == "BCI_3" ~ "BCi_3",
+  T ~ as.character(hae.combined$SampleID)
+) %>%
+  factor(
+    levels = c(
+      # insert levels here..
+      "BCi_1",
+      "BCi_2",
+      "BCi_3",
+      "primary_1",
+      "primary_2",
+      "primary_3"
+    )
+  )
+```
+
+Cells are colored by population assignment from `01_annotate_clusters.Rmd`. 
+
+```{r, fig.height = 6, fig.width = 9}
+p1 <- CustomUMAP(
+  hae.combined,
+  group.ident = "cluster_pretty",
+  colors = ggsci::pal_d3(palette = "category20")(20),
+  plot.title = "Cell type annotation",
+  pt.size = 0.1,
+  legend.col = 1,
+  ciclelabels = TRUE,
+  byrow = TRUE,
+  label = FALSE,
+  inset = FALSE,
+  shape = 21,
+  legend.title = NULL,
+  legend.position = "top left",
+  legend.text.align = 0
+)
+
+p1 <- p1 +
+  coord_fixed() +
+  theme(
+    text = element_text(size = 16),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 20),
+    legend.position = "right",
+    legend.background = element_blank(),
+    panel.border = element_blank(),
+    axis.line.y = element_line(arrow = grid::arrow(length = unit(0.2, "cm"), ends = "last")),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    axis.line.x = element_line(arrow = grid::arrow(length = unit(0.2, "cm"), ends = "last"))
+  ) +
+  labs(
+    title = NULL,
+    subtitle = paste(scales::comma_format(digits = 12)(dim(hae.combined)[2]), "cells")
+  )
+
+ggsave(
+  plot = p1,
+  filename = "../figures/Figure02A.pdf",
+  height = 6,
+  width = 9,
+)
+
+p1
+```
+
+#### Cell count by BCi / primary sample replicate
+
+```{r}
+by.replicate <- FetchData(hae.combined, c("SampleID")) %>%
+  group_by(SampleID) %>%
+  summarise(n_cells = n()) %>%
+  mutate(
+    `percent of total` = prop.table(n_cells) * 100
+  )
+by.replicate
+```
+
+The minimal number of cells per sample is `r min(by.replicate$n_cells)`. 
+
+#### Overall cell population frequencies
+
+```{r}
+by.population <- FetchData(hae.combined, c("SampleID", "cluster_pretty")) %>%
+  group_by(cluster_pretty) %>%
+  summarise(n_cells = n()) %>%
+  mutate(
+    `percent of total` = prop.table(n_cells) * 100
+  )
+by.population
+```
+
+### B. Cell population frequency by replicate
+
+To assess if differences in cluster abundance are significant across culture types, we will apply differential abundance analysis. 
+I will use the minor cluster assignments here for finer resolution of any differences. 
+I am using edgeR and this vignette from OCSA as a guide.^[See Chapter 6 of OCSA Multisample: http://bioconductor.org/books/3.15/OSCA.multisample/]
+
+```{r bars, fig.width = 6, fig.height = 1.8}
+cell_cluster_dat <- FetchData(
+  object = hae.combined,
+  vars = c("UMAP_1", "UMAP_2", "cluster_minor", "cluster_major", "cluster_pretty", "SampleID", "SampleGroup")
+) %>%
+  mutate(
+    # order groups so increasing in downwise fashion...
+    SampleID = factor(SampleID, levels = sort(unique(SampleID), decreasing = T)),
+    SampleGroup = factor(SampleGroup, levels = sort(unique(SampleGroup), decreasing = F)),
+    # order clusters so that 'basal' appears first in horizontal bar...
+    cluster_pretty = fct_rev(cluster_pretty)
+  )
+
+# tabulate abundances
+abundances <- table(cell_cluster_dat$cluster_pretty, cell_cluster_dat$SampleID)
+
+# define DGEList object with culture type info as column
+dge.extra <- cell_cluster_dat[c("SampleGroup")][match(colnames(abundances), cell_cluster_dat$SampleID), ]
+dge <- DGEList(abundances, group = dge.extra)
+
+# contrast design
+design <- model.matrix(~ factor(group), dge$samples)
+
+# estimate dispersion, calculate fit, obtain test result
+dge <- estimateDisp(dge, design, trend = "none")
+fit.ab <- glmQLFit(dge, design, robust = TRUE, abundance.trend = FALSE)
+res <- glmQLFTest(fit.ab, coef = ncol(design))
+
+# annotation for p * < 0.05, ** < 0.01, ***< 0.001
+# cast as data.frame for display
+DA.res <- data.frame(topTags(res, n = 20)) %>%
+  mutate(
+    cluster = rownames(.) %>% factor(levels = levels(cell_cluster_dat$cluster_pretty)),
+    cluster_anno = case_when(
+      PValue < 0.001 ~ paste0(cluster, " (***)"),
+      PValue < 0.01 ~ paste0(cluster, " (**)"),
+      PValue < 0.05 ~ paste0(cluster, " (*)"),
+      T ~ as.character(cluster)
+    )
+  ) %>%
+  tibble() %>%
+  arrange(cluster)
+
+bars <- ggplot(cell_cluster_dat, aes(SampleID, fill = cluster_pretty)) +
+  geom_bar(position = "fill", color = "black") +
+  scale_fill_d3(palette = "category20", alpha = 0.8) +
+  coord_flip() +
+  theme_classic() +
+  facet_grid(rows = "SampleGroup", scales = "free") +
+  theme(legend.position = "bottom", strip.background = element_blank(), strip.text.y = element_blank(), text = element_text(size = 18), legend.title = element_blank()) +
+  labs(y = "Fraction of total cells", x = NULL)
+
+# re-labelling legend with automated significant differential abundance associations.
+# be careful here...
+bars <- bars +
+  scale_fill_manual(
+    values = pal_d3(palette = "category20", alpha = 0.8)(12),
+    limits = rev(DA.res$cluster),
+    labels = rev(DA.res$cluster_anno)
+  ) +
+  theme(text = element_text(size = 16))
+
+
+ggsave(
+  plot = bars & NoLegend(),
+  filename = "../figures/Figure02B.pdf",
+  height = 1.8,
+  width = 6,
+)
+
+bars & NoLegend()
+```
+
+A summary of the differential abundance results, showing a higher proportion of secretory III, deuterosomal, and ciliated populations in BCi HAE cultures. 
+
+```{r}
+DA.res %>%
+  relocate(cluster) %>%
+  arrange(FDR)
+```
+
+### C. Dot plot of HAE population marker genes
+
+An expanded view of marker genes for the component HAE cell types. 
+
+Basal cells canonically express Krt5 and Tp63, though here expression peaks in the suprabasal population. [@Hewitt2021-yx] 
+Cycling / proliferating cells display a readily apparent signature, here shown by Mki67 and Top2A expression. 
+Suprabasal cells have been described as Krt5<sup>+</sup> / Krt4<sup>+</sup> / Krt13<sup>+</sup> / Tp63<sup>lo</sup> and show specific NOTCH3 expression. [@Ruiz_Garcia2019-fb]
+The 'intermediate' cluster here lies between suprabasal cells and secretory cells. 
+
+Krt16 and Krt23 have been reported to have specific suprabasal cell expression though in separate subpopulations, with 16 expressed earlier and 23 expressed later [@Ruiz_Garcia2019-fb]. 
+Krt6A is also expressed in early suprabasal cells. 
+
+Although canonically understood as a mixture of goblet (MUC5AC<sup>+</sup>) and club (SCGB1A1<sup>+</sup>) cells, 
+recent work has highlighted that the secretory cell landscape is more complex than previously appreciated. Here two secretogolobulins and two mucins are
+displayed as marker genes.
+The deuterosomal or 'early ciliating' cluster expresses DEUP1 and forkhead box N4 (FOXN4), along with CDC20B (not shown). [@Goldfarbmuren2020-lb; @Plasschaert2018-ss; @Ruiz_Garcia2019-fb; @Revinski2018-yj]
+Mature ciliated cells express FOXJ1 and CAPS. [@Hewitt2021-yx]
+ASCL2, LRMP, and POU2F3 have been shown as characteristic tuft cell markers in humans. [@Goldfarbmuren2020-lb; @Hewitt2021-yx]
+FOXI1 and CFTR are the classic markers for ionocytes [@Plasschaert2018-ss; @Montoro2018-br]
+ASCL1 and HOXB5 are characteristic markers for neuroendocrine cells. [@Hewitt2021-yx]
+
+```{r}
+Idents(hae.combined) <- "cluster_minor"
+sel.features <- c(
+  # basal
+  "KRT5",
+  "TP63",
+
+  # proliferating
+  "MKI67",
+  "TOP2A",
+
+  # suprabasal/intermediate
+  "KRT16",
+  "KRT6A",
+  "KRT13",
+  "KRT4",
+  "CYP2F1",
+  "XBP1",
+
+  # secretoglobulins
+  "SCGB1A1",
+  "SCGB3A1",
+
+  # mucins
+  "MUC5B",
+  "MUC5AC",
+
+  # deuterosomal
+  "DEUP1",
+  "FOXN4",
+
+  # ciliated
+  "FOXJ1",
+  "CAPS",
+
+  # tuft-like
+  "LRMP",
+  "ASCL2",
+
+  # ionocyte
+  "FOXI1",
+  "CFTR",
+
+  # neuroendocrine
+  "ASCL1",
+  "HOXB5"
+)
+```
+
+#### Marker dot plot by sample replicate
+
+```{r markers_by_replicate, fig.height = 8, fig.width = 15}
+DefaultAssay(hae.combined) <- "RNA"
+Idents(hae.combined) <- "cluster_minor"
+hae.combined$SampleID <- factor(hae.combined$SampleID)
+
+# initial plot
+dotplot <- DotPlot(hae.combined,
+  features = sel.features,
+  group.by = "cluster_minor",
+  split.by = "SampleID",
+  cols = pal_d3()(6)
+)
+dotplot$data <- dotplot$data %>%
+  group_by(features.plot) %>%
+  mutate(`Scaled Expression` = (avg.exp - mean(avg.exp)) / sd(avg.exp))
+
+scale_limits <- max(dotplot$data$avg.exp.scaled)
+scale_limits <- c(-scale_limits, scale_limits)
+
+dotplot$data$dge_group <- map_chr(str_split(dotplot$data$id, "_"), 1) %>% factor(levels = levels(hae.combined$cluster_minor))
+dotplot$data$group <- str_match(dotplot$data$id, ".+_(.+)_[0-9]")[, 2]
+
+lt <- lapply(
+  X = levels(hae.combined$cluster_minor),
+  FUN = function(x) paste(x, levels(hae.combined$SampleID), sep = "_")
+)
+id.order <- do.call(c, lt)
+dotplot$data$id <- factor(dotplot$data$id, levels = id.order)
+x.labels <- map_chr(str_split(levels(dotplot$data$id), "_"), 2)
+
+# final plot
+marker_dots2 <- ggplot(dotplot$data, aes(x = factor(id), y = features.plot)) +
+  geom_point(aes(color = `Scaled Expression`, size = pct.exp)) +
+  scale_size(
+    range = c(0.1, 6), limits = c(0, 100),
+    name = "Percent cells expressing gene"
+  ) +
+  geom_tile(aes(fill = dge_group, y = length(sel.features) + 2), size = 1) +
+  geom_tile(aes(fill = group, y = length(sel.features) + 1), size = 1) +
+  scale_fill_manual(
+    values = c(pal_d3(palette = "category20", alpha = 0.8)(12), c("#D12A86", "#61D270")),
+    limits = c(levels(hae.combined$cluster_minor), "BCi", "primary"),
+    labels = c(levels(hae.combined$cluster_pretty), "BCi", "primary"),
+    name = "Cell type"
+  ) +
+  scale_y_discrete(limits = rev) +
+  scale_color_distiller(type = "div", oob = scales::oob_squish, values = scales::rescale(c(-3, 0, 3)), limits = c(-3, 3), guide = guide_colorbar(order = 1, barwidth = 8, barheight = 1)) +
+  # use a function for labeller instead!!
+  scale_x_discrete(position = "top", labels = function(x) {
+    map_chr(str_split(x, "_"), 2)
+  }) +
+  dot_theme_fxn(base_size = 26) +
+  facet_wrap(~dge_group, nrow = 1, scales = "free_x") +
+  theme(
+    panel.spacing = unit(0, "mm"),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_text(size = 16, face = "oblique"),
+    panel.border = element_rect(color = "grey70", linetype = 1, size = 0.5),
+    strip.background = element_blank(),
+    strip.text.x = element_blank(),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 16)
+  )
+
+ggsave(
+  plot = marker_dots2,
+  filename = "../figures/Figure02C.pdf",
+  height = 8,
+  width = 15,
+)
+
+marker_dots2
+```
+
+### D. Pseudotime differential progression
+
+```{r}
+# seurat to singlecellexperiment
+DefaultAssay(hae.combined) <- "RNA"
+hae.sce <- as.SingleCellExperiment(hae.combined, assay = "RNA")
+colData(hae.sce) <- droplevels(colData(hae.sce))
+
+pseudotime.sel.clust <- c("basal", "suprabasal", "intermediate", "secretory 1", "secretory 2", "secretory 3")
+hae.psts <- hae.sce[, hae.sce$cluster_minor %in% pseudotime.sel.clust]
+
+# DANGER! Removing outliers manually, change if UMAP projection changes...
+hae.psts <- hae.psts[, reducedDim(hae.psts, "UMAP")[, 1] < 6]
+hae.psts <- hae.psts[, reducedDim(hae.psts, "UMAP")[, 2] < 9]
+
+# USE `approx_points` param...
+# Not specifying terminal clusters...
+hae.psts <- slingshot(hae.psts, clusterLabels = "cluster_major", reducedDim = "UMAP", approx_points = 150, start.clus = "basal")
+```
+
+```{r}
+sds <- SlingshotDataSet(hae.psts)
+psts <- slingPseudotime(hae.psts) %>%
+  as.data.frame() %>%
+  mutate(
+    cells = rownames(.),
+    SampleID = factor(hae.psts$SampleID, levels = sort(unique(hae.psts$SampleID), decreasing = T)),
+    SampleGroup = factor(hae.psts$SampleGroup, levels = sort(unique(hae.psts$SampleGroup), decreasing = F)),
+    cluster_pretty = hae.psts$cluster_pretty,
+    cluster_major = hae.psts$cluster_major
+  ) %>%
+  pivot_longer(starts_with("Lineage"), values_to = "pseudotime", names_to = "lineages")
+```
+
+```{r pseudotime_density, fig.width = 8, fig.height = 3}
+group_cols <- c("#61D270", "#D12A86")
+
+ridges <- ggplot(
+  psts %>% filter(lineages == "Lineage1"), aes(x = pseudotime, y = SampleGroup, fill = SampleGroup)
+) +
+  geom_density_ridges2(
+    alpha = 1,
+    scale = 0.8
+  ) +
+  scale_fill_manual(
+    values = group_cols
+  ) +
+  scale_x_continuous(
+    breaks = c(0, 5, 10, 15, 20)
+  ) +
+  scale_y_discrete(limits = rev(levels(psts$SampleGroup))) +
+  theme_classic() +
+  labs(y = "Cell density", x = "Pseudotime") +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 16)
+  )
+
+pseudotime.df <- colData(hae.psts)["slingPseudotime_1"] %>% as_tibble(rownames = "cell_barcode")
+lineage_ggdata <- reducedDims(hae.sce)$UMAP %>% as_tibble(rownames = "cell_barcode")
+lineage_ggdata <- full_join(lineage_ggdata, pseudotime.df, by = "cell_barcode")
+
+p.lineage <- ggplot(
+  data = lineage_ggdata,
+  aes(UMAP_1, UMAP_2, color = slingPseudotime_1)
+) +
+  geom_point(alpha = 0.5, size = 0.5) +
+  geom_path(
+    data = sds@curves$Lineage1$s %>% as_tibble(),
+    aes(x = UMAP_1, y = UMAP_2),
+    color = "black",
+    size = 2
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 16),
+    axis.line.y = element_line(arrow = grid::arrow(length = unit(0.2, "cm"), ends = "last")),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    axis.line.x = element_line(arrow = grid::arrow(length = unit(0.2, "cm"), ends = "last"))
+  ) +
+  labs(
+    x = "UMAP 1",
+    y = "UMAP 2"
+  ) +
+  coord_fixed() +
+  scale_color_viridis_c(
+    guide = guide_colorbar(title = "Pseudotime"),
+    na.value = "grey80"
+  )
+```
+
+UMAP plot showing inferred cell lineage and pseudotime values for both culture progenitor groups superimposed. 
+
+```{r, fig.height=4, fig.width=4}
+ggsave(
+  plot = p.lineage,
+  filename = "../figures/Figure02D.pdf",
+  height = 4,
+  width = 4,
+)
+p.lineage
+```
+
+### E. Pseudotime distribution by progenitor group
+
+Plotting cell distribution along pseudotime lineage for each culture group. First, running `progressionTest()`
+(performs a K-S Goodness of Fit Test) on collapsed HAE progenitor groups to assess if there are any 
+salient differences across conditions. 
+
+```{r}
+# running K/S test across culture types...
+ks.res <- progressionTest(
+  slingPseudotime(hae.psts),
+  cellWeights = slingCurveWeights(hae.psts),
+  conditions = hae.psts$SampleGroup,
+  global = FALSE,
+  lineages = TRUE
+)
+
+ks.res
+```
+
+The p-value here underflows, indicating that there are clear differences in distribution.
+
+```{r, fig.width = 4, fig.height = 3.5}
+ridges <- ridges +
+  annotate(
+    geom = "text",
+    x = 1,
+    y = 0.5,
+    label = paste("p =", ks.res$p.value)
+  )
+
+ggsave(
+  plot = ridges,
+  filename = "../figures/Figure02E.pdf",
+  height = 3.5,
+  width = 4
+)
+ridges
+```
+
+
+### F. Pseudotime distirbution by cell population.
+
+The next code chunk runs hypothesis testing for differential pseudotime using a Wilcoxon Rank Sum Test for each cell population. The minimal possible p-value is 0.1 with three replicates per condition, indicated below by a (\*). 
+
+```{r}
+psts.sum <- psts %>%
+  group_by(
+    cluster_pretty,
+    SampleGroup,
+    SampleID
+  ) %>%
+  summarise(
+    pseudotime = mean(pseudotime)
+  )
+
+# apply Wilcox test to pseudotime values...
+f <- function(x) {
+  res <- wilcox.test(
+    pseudotime ~ SampleGroup,
+    data = psts.sum,
+    subset = psts.sum$cluster_pretty == x
+  )
+  return(res)
+}
+
+X <- sort(unique(psts$cluster_pretty))
+wilcox.res <- lapply(
+  X = X,
+  FUN = f
+)
+names(wilcox.res) <- X
+
+# annotation for p * < 0.05, ** < 0.01, ***< 0.001
+# cast as data.frame for display
+wilcox.res.df <- tibble(cluster = X, p.value = lapply(1:6, function(x) {
+  wilcox.res[[x]]$p.value
+}) %>% as.double()) %>%
+  mutate(
+    cluster_anno = case_when(
+      p.value == 0.1 ~ paste0(cluster, "*"),
+      T ~ as.character(cluster)
+    )
+  )
+
+wilcox.res.df
+```
+
+```{r, fig.width = 6, fig.height = 3.5}
+boxes <- psts %>%
+  mutate(ID_cluster = paste0(SampleID, cluster_pretty)) %>%
+  ggplot(aes(x = cluster_pretty, y = pseudotime, fill = SampleGroup, group = ID_cluster)) +
+  geom_boxplot(outlier.stroke = 0.3, outlier.size = 1, lwd = 0.3) +
+  scale_fill_manual(values = group_cols, guide = guide_legend(title = NULL)) +
+  scale_y_continuous(breaks = c(0, 5, 10, 15, 20)) +
+  scale_x_discrete(labels = wilcox.res.df$cluster_anno) +
+  labs(x = NULL, y = "Pseudotime") +
+  coord_flip() +
+  theme_classic() +
+  theme(
+    text = element_text(size = 16)
+  )
+
+ggsave(
+  plot = boxes,
+  filename = "../figures/Figure02F.pdf",
+  height = 3.5,
+  width = 6
+)
+
+boxes
+```
+
+## Figure 3. Gene expression differences by HAE cell population
+
+```{r}
+# setting this to 25 cells...
+min.pseudo.ncells <- 25
+```
+
+In order to assess any differences in cell type expression profiles between NHBE and BCi-NS1
+cultures, cellular transcriptomes (i.e. count matrices) will be collapsed into 'pseudobulk' profiles 
+corresponding to their particular cell type, setting a minimum of `r min.pseudo.ncells` cells. Importantly, this
+is upstream of data integration and allows us to investigate variation present before
+correcting for any batch effects. The relatively low cutoff for cell number was set as there are a relatively small 
+number of ciliated cells in the NHBE cultures. As above, for initial visualization I will use the major cluster assignments 
+but then perform differential gene expression testing and GSEA with the higher resolution clusters. 
+
+This cell generates `hae.se`, the pseudobulk SummarizedExperiment object used in downstream steps.
+
+```{r}
+pal_minor <- pal_d3(palette = "category20", alpha = 0.8)(12)
+names(pal_minor) <- levels(hae.combined$cluster_pretty)
+
+# seurat to singlecellexperiment
+DefaultAssay(hae.combined) <- "RNA"
+hae.sce <- as.SingleCellExperiment(hae.combined, assay = "RNA")
+colData(hae.sce) <- droplevels(colData(hae.sce))
+
+# would generate pseudo-bulk matrices
+# think about if I want to filter based on cluster membership
+hae.se <- scuttle::aggregateAcrossCells(hae.sce, ids = hae.sce@colData[c("SampleID", "cluster_minor")])
+
+hae.se <- hae.se[, hae.se$ncells >= min.pseudo.ncells]
+```
+
+The following code chunk performs principal component analysis on the pseudobulk expression profiles. (Note
+that I am not performing formal differential expression testing with DESeq2, just
+variance stabilization.) For the variance calculation for each PC, see this post ^[https://ro-che.info/articles/2017-12-11-pca-explained-variance]
+
+```{r}
+dds <- DESeqDataSet(hae.se, ~ SampleGroup + cluster_minor)
+
+# filter profiles...
+keeps <- rowSums(counts(dds)) > 1
+dds <- dds[keeps, ]
+
+# variance stabilizing transform...
+vsd <- DESeq2::vst(dds, blind = T)
+```
+
+### A. Spearman correlation of pseudobulk expression profiles 
+
+```{r, fig.height=1.5, fig.width = 8}
+colnames(vsd) <- paste(vsd$SampleID, vsd$cluster_pretty, sep = "-")
+
+# Calculating correlation distance...
+m <- WGCNA::cor(assay(vsd), method = "spearman")
+sampleDists <- as.dist(1 - m)
+
+# calculate dendrogram
+hc <- hclust(sampleDists, method = "ward.D2")
+dend <- as.dendrogram(hc)
+leaf_shape <- ifelse(startsWith(labels(dend), "primary"), 17, 19)
+bar_colors <- pal_minor[colData(vsd)$cluster_pretty]
+x <- str_split(labels(dend), "_.-") %>% map_chr(2)
+leaf_col <- pal_minor[factor(x, levels = levels(hae.combined$cluster_pretty))]
+dend <- dend %>%
+  dendextend::set("leaves_pch", leaf_shape) %>%
+  dendextend::set("leaves_cex", 1.5) %>%
+  dendextend::set("leaves_col", leaf_col) %>%
+  dendextend::set("labels_cex", NA)
+
+# rotate branches of tree to order cell types in a more intuitive fashion...
+# branch rotatation with ape::rotate does not work! Use dendextend::rotate instead.
+dend <- dendextend::rotate(dend, labels(dend)[c(26:6, 29:34, 36:47, 35, 27:28, 1:5)])
+ggdend <- as.ggdend(dend, labels = FALSE)
+dendro_gg <- ggplot() +
+  geom_segment(
+    data = ggdend$segments,
+    aes(x, y, yend = yend, xend = xend)
+  ) +
+  geom_point(
+    data = ggdend$nodes,
+    aes(x, y),
+    color = ggdend$nodes$col,
+    size = 3.5,
+    shape = ggdend$nodes$pch
+  ) +
+  theme_dendro()
+
+# save horizontal dendrogram...
+dendro_gg_h <- dendro_gg
+
+ggsave(
+  plot = dendro_gg_h,
+  filename = "../figures/Figure03A_strip_x.pdf",
+  height = 1.5,
+  width = 8
+)
+
+# save vertical dendrogram...
+dendro_gg_v <- dendro_gg +
+  coord_flip() +
+  scale_x_reverse()
+
+ggsave(
+  plot = dendro_gg_v,
+  filename = "../figures/Figure03A_strip_y.pdf",
+  height = 8,
+  width = 1.5
+)
+
+# show horizontal dendrogram...
+dendro_gg_h
+```
+
+```{r, fig.height = 7, fig.width = 10}
+point.size <- 4.0
+anno_pad <- 0.3
+
+order <- as.character(ggdend$labels$label)
+m <- WGCNA::cor(assay(vsd)[, rev(order)], method = "spearman")
+m[lower.tri(m)] <- NA
+
+# setting "check.names" to F
+d <- data.frame(m, check.names = F) %>%
+  mutate(
+    profile_x = rownames(.) %>% factor(levels = order)
+  ) %>%
+  pivot_longer(
+    1:dim(m)[[1]],
+    names_to = "profile_y",
+    values_to = "distance"
+  ) %>%
+  mutate(
+    profile_y = factor(profile_y, levels = rev(order)),
+  ) %>%
+  na.omit()
+
+coldata <- tibble(profile = order) %>%
+  mutate(
+    spl = str_split(profile, "-"),
+    group = map_chr(spl, 1) %>% str_split("_") %>% map_chr(1),
+    celltype = map_chr(spl, 2)
+  )
+
+tri_gg <- ggplot(d, aes(profile_x, profile_y, fill = distance)) +
+  geom_tile() +
+  geom_point(data = coldata, aes(x = profile, y = length(order) + 1 + anno_pad, fill = NA_real_, color = celltype, shape = group), size = point.size, stroke = 0) +
+  geom_point(data = coldata, aes(y = profile, x = length(order) + 1 + anno_pad, fill = NA_real_, color = celltype, shape = group), size = point.size, stroke = 0) +
+  scale_x_discrete(position = "top", expand = c(0.1, 0.1)) +
+  scale_y_discrete(position = "right", expand = c(0.1, 0.1)) +
+  scale_fill_viridis_c() +
+  scale_color_manual(
+    values = pal_d3(palette = "category20", alpha = 0.8)(20),
+    limits = levels(hae.combined$cluster_pretty),
+    labels = levels(hae.combined$cluster_pretty)
+  ) +
+  guides(
+    fill = guide_colorbar(title = "Spearman correlation", order = 3),
+    color = guide_legend(title = "Cell type", order = 1),
+    shape = guide_legend(title = "Group", order = 2)
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(
+    aspect.ratio = 1,
+    panel.grid.major = element_blank(),
+    axis.text.x.top = element_blank(),
+    axis.text.y.right = element_blank(),
+    legend.position = "right",
+    text = element_text(size = 16)
+  )
+
+ggsave(
+  plot = tri_gg,
+  filename = "../figures/Figure03A.pdf",
+  height = 7,
+  width = 10
+)
+
+tri_gg
+```
+
+### B. Principal component analysis. 
+
+PCA plots show strong segregation by cell type in the first 3 PCs, with PC4 capturing variation by culture progenitor group. 
+
+```{r, fig.height = 6, fig.width = 10}
+# set number of genes...
+ntop <- 3000
+
+# calculate variance per gene
+rv <- rowVars(assay(vsd))
+
+# select the ntop genes by variance
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+# perform a PCA on the data in assay(x) for the selected genes
+pca <- prcomp(t(assay(vsd)[select, ]))
+
+# save PCs
+plot.dat <- colData(dds) %>% as_data_frame()
+pc.lt <- lapply(1:6, function(i) as.vector(pca$x[, i]))
+names(pc.lt) <- paste0("PC", 1:6)
+plot.dat <- cbind.data.frame(plot.dat, pc.lt)
+
+# calculate variances (note uses the full pca object)
+var.mat <- apply(pca$x, 2, var)
+rel.var.mat <- var.mat / sum(var.mat)
+
+plts <- list(
+  drawPCAPlot(plot.dat, rel_variances = rel.var.mat, x = "PC2", y = "PC1", color = "cluster_pretty") + scale_color_manual(values = pal_minor) + scale_shape_manual(values = c("primary" = 17, "BCi" = 19)),
+  drawPCAPlot(plot.dat, rel_variances = rel.var.mat, x = "PC4", y = "PC3", color = "cluster_pretty") + scale_color_manual(values = pal_minor) + scale_shape_manual(values = c("primary" = 17, "BCi" = 19))
+)
+
+pcaplot_gg <- wrap_plots(plts, ncol = 2) &
+  theme(
+    aspect.ratio = 1,
+    text = element_text(size = 16)
+  ) &
+  guides(color = guide_legend(title = "cluster"))
+
+pcaplot_gg <- pcaplot_gg + plot_layout(guides = "collect")
+
+ggsave(
+  plot = pcaplot_gg,
+  filename = "../figures/Figure3B.pdf",
+  height = 6,
+  width = 10
+)
+
+pcaplot_gg + plot_layout(guides = "collect")
+```
+
+PCA conducted using the top `r ntop` genes by variance. 
+
+### C. Differential gene expression analysis by HAE cell type (contrasting BCi-NS1 v. primary)
+
+Here I used scran's `pseudoBulkDGE()` function to run a differential gene expression pipeline on 
+the pseudobulked transcriptome data. For the design variable, I use `design ~ SampleGroup`, with the NHBE 
+set as the reference level. For my differential expression decision function,
+I select genes with p < 0.05, log<sub>2</sub>FC > 1, and expression in at least 10% of cells. 
+
+```{r}
+sel.clust <- c("basal", "suprabasal", "intermediate", "secretory I", "secretory II")
+
+# run edgeR pipeline on expression profiles...
+de.results <- scran::pseudoBulkDGE(
+  hae.se,
+  label = hae.se$cluster_pretty,
+  design = ~ factor(SampleGroup, levels = c("primary", "BCi")),
+  coef = 2,
+  include.intermediates = TRUE
+)
+
+# calculate statistics on single cell experiment object...
+# to be used when filtering DEGs by expression..
+hae.sce.summary <- scuttle::summarizeAssayByGroup(
+  hae.sce,
+  ids = hae.sce$cluster_pretty %>% as.character(),
+  statistics = c("prop.detected")
+)
+
+# constructing one big DEG table...
+# annotating with gene and cluster columns..
+de.results.lt <- mapply(
+  function(x, y) {
+    x %>%
+      as_tibble() %>%
+      mutate(gene = row.names(x), cluster = y)
+  },
+  x = de.results,
+  y = names(de.results),
+  SIMPLIFY = F
+)
+big.de.results <- do.call(rbind, de.results.lt)
+
+# casting stats assay as data frame...
+x <- assay(hae.sce.summary, "prop.detected")
+prop.detected <- x %>%
+  as.data.frame() %>%
+  mutate(gene = rownames(.)) %>%
+  pivot_longer(cols = 1:ncol(x), names_to = "cluster", values_to = "prop.detected") %>%
+  arrange(cluster, desc(prop.detected))
+
+# joining to single cell statistics...
+big.de.results.joined <- left_join(
+  big.de.results,
+  prop.detected,
+  by = c("cluster", "gene")
+) %>% relocate(cluster, gene, prop.detected)
+
+p.cutoff <- 0.05
+logFC.cut <- 1
+exp.cutoff <- 0.10
+
+# decision function...
+# adopting the -1, 0, 1, NA nomenclature from edgeR. Anything below the expression cutoff
+# `expcutoff` in the single cell data will be masked as NA.
+# expects the columns PValue, logFC, & prop.detected
+big.de.results.joined <- big.de.results.joined %>%
+  filter(cluster %in% sel.clust) %>%
+  mutate(
+    is.deg = case_when(
+      (logFC < 0) & (PValue < p.cutoff) & (abs(logFC) > logFC.cut) & (prop.detected >= exp.cutoff) ~ -1,
+      (logFC > 0) & (PValue < p.cutoff) & (abs(logFC) > logFC.cut) & (prop.detected >= exp.cutoff) ~ 1,
+      (PValue >= p.cutoff) | (abs(logFC) <= logFC.cut) | (prop.detected >= exp.cutoff) ~ 0
+    )
+  ) %>%
+  mutate(
+    cluster = factor(cluster, levels = levels(hae.combined$cluster_pretty))
+  )
+
+big.de.results.joined %>%
+  group_by(cluster, is.deg) %>%
+  summarise(n = n()) %>%
+  pivot_wider(names_from = is.deg, values_from = n) %>%
+  select(cluster, "N genes up" = `1`, "N genes down" = `-1`)
+```
+
+```{r deg_volcanos, fig.width = 15, fig.height = 3}
+# subsets to plot...
+plot.dat <- big.de.results.joined %>%
+  # NAs for DEGs includes those which don't meet % threshold of detection in pseudobulks...
+  na.omit() %>%
+  mutate(
+    cluster = factor(cluster, levels = sel.clust)
+  )
+
+# paste together annotations...
+anno <- big.de.results.joined %>%
+  group_by(cluster, is.deg) %>%
+  summarise(n = n()) %>%
+  filter(
+    is.deg %in% c(-1, 1)
+  ) %>%
+  # hard coding x,y coords for text display...
+  mutate(
+    s = str_c("n=", n),
+    x = is.deg * 8,
+    y = 18
+  )
+
+# seed to plot text labels...
+set.seed(3)
+
+# plot...
+volcano_gg <- UpDownVolcano(
+  plot.dat,
+  label.n = 0,
+  alpha = 0.1,
+  manual_ids = c("TERT", "ISG15", "IFIT1", "MX1")
+) +
+  facet_wrap(~cluster, nrow = 1) +
+  geom_hline(yintercept = 1.30103, color = "black", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "black", linetype = "dashed") +
+  geom_text(data = anno, aes(x = x, y = y, label = s), hjust = 0.5, size = unit(4, "pt"), color = "black") +
+  scale_x_continuous(limits = c(-10, 10)) +
+  coord_fixed() +
+  theme(
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = NA),
+    text = element_text(size = 16),
+    strip.text.x = element_text(size = 16, face = "bold")
+  ) +
+  labs(
+    x = expression("log"[2] * "FC"),
+    y = expression("-log"[10] * "(p)")
+  )
+
+ggsave(
+  plot = volcano_gg,
+  filename = "../figures/Figure03C.pdf",
+  height = 3,
+  width = 15
+)
+
+volcano_gg
+```
+
+### Supplemental data file 1. Differentially expressed genes by HAE cell population.
+
+Provided as .csv. Contains a `prop.detected` field for scRNA capture for that cluster. 
+
+```{r}
+# export as single .csv..
+diff.exp.df <- big.de.results.joined %>%
+  filter(is.deg != 0) %>%
+  rename(direction = is.deg) %>%
+  arrange(cluster, desc(direction), FDR)
+
+# write to data directory...
+write_xlsx(
+  diff.exp.df,
+  path = here::here("analysis/data/diff_gene_exp_all_groups.xlsx"),
+  col_names = TRUE
+)
+
+length(unique(diff.exp.df$gene))
+```
+
+### D: DEG overlap by HAE cell population
+
+A combined up/down directional "UpSet" plot using the package ComplexUpset. Gene sets are constructed by identity (i.e. shared symbol) and direction (i.e. up vs. down).
+
+```{r}
+# up
+de.results.up.wide <- big.de.results.joined %>%
+  filter(is.deg == 1) %>%
+  select(cluster, gene, is.deg) %>%
+  mutate(
+    direction = "up"
+  ) %>%
+  pivot_wider(names_from = "cluster", values_from = "is.deg")
+de.results.up.wide[is.na(de.results.up.wide)] <- 0
+de.results.up.wide$gene <- paste0(de.results.up.wide$gene, ".up")
+
+# down
+de.results.down.wide <- big.de.results.joined %>%
+  filter(is.deg == -1) %>%
+  select(cluster, gene, is.deg) %>%
+  mutate(
+    direction = "down"
+  ) %>%
+  pivot_wider(names_from = "cluster", values_from = "is.deg")
+de.results.down.wide[is.na(de.results.down.wide)] <- 0
+de.results.down.wide[de.results.down.wide == -1] <- 1
+de.results.down.wide$gene <- paste0(de.results.down.wide$gene, ".down")
+
+de.results.wide.dir <- rbind.data.frame(de.results.up.wide, de.results.down.wide) %>%
+  arrange(gene) %>%
+  as.data.frame() %>%
+  mutate(direction = factor(direction, levels = c("up", "down")))
+```
+
+```{r, deg_upsets, fig.height = 4, fig.width = 6}
+core.genes.up <- de.results.up.wide %>%
+  filter(rowSums(across(where(is.numeric))) == 5) %>%
+  pull(gene) %>%
+  str_split(pattern = "\\.") %>%
+  map_chr(1)
+
+core.genes.down <- de.results.down.wide %>%
+  filter(rowSums(across(where(is.numeric))) == 5) %>%
+  pull(gene) %>%
+  str_split(pattern = "\\.") %>%
+  map_chr(1)
+
+# List core genes
+s <- paste(core.genes.up, collapse = ", ")
+core.up.str <- gsub("(\\S+ \\S+ \\S+ \\S+ )", "\\1\n", s)
+
+# List core genes
+s <- paste(core.genes.down, collapse = ", ")
+core.down.str <- gsub("(\\S+ \\S+ \\S+ \\S+ )", "\\1\n", s)
+
+
+gg <- ComplexUpset::upset(
+  de.results.wide.dir,
+  rev(sel.clust),
+  name = "cluster",
+  width_ratio = 0.3,
+  min_size = 20,
+  stripes = NA,
+  sort_sets = F,
+  guides = "over",
+  base_annotations = list(
+    "genes" = intersection_size(counts = F, mapping = aes(fill = direction)) +
+      scale_fill_manual(values = c("red", "blue"), labels = c("up in BCi", "down in BCi"))
+  ),
+  set_sizes = upset_set_size(geom = geom_bar(), position = "right") + labs(y = "genes") + geom_text(aes(label = ..count..), hjust = 1.1, stat = "count", color = "white"),
+  queries = list(
+    upset_query(
+      intersect = sel.clust,
+      color = "goldenrod3",
+      fill = "goldenrod3",
+      only_components = c("intersections_matrix")
+    ),
+    upset_query(
+      intersect = sel.clust,
+      color = "goldenrod3",
+    )
+  )
+)
+
+gg[[1]] <- gg[[1]] +
+  theme(panel.grid.major.x = element_blank()) +
+  labs(y = "DEGs")
+
+gg[[4]] <- gg[[4]] +
+  theme(axis.ticks.x = element_blank(), panel.grid = element_blank(), axis.text.x.bottom = element_blank()) +
+  labs(y = "DEGs")
+
+upset_gg <- gg & theme(text = element_text(size = 16))
+
+ggsave(
+  plot = upset_gg,
+  filename = "../figures/Figure03E.pdf",
+  height = 4,
+  width = 6
+)
+
+upset_gg
+```
+
+### E. Gene set enrichment testing with CAMERA (C2 canonical pathway)
+
+```{r, fig.width = 10, fig.height = 10}
+gsea_labeller_fxn <- function(X, l = 50) {
+  X <- str_to_title(str_replace_all(X, "_", " "))
+  map_chr(.x = X, .f = function(x) {
+    if (nchar(x) > l) {
+      return(paste0(substr(x, 1, l), "..."))
+    } else {
+      return(x)
+    }
+  })
+}
+
+# read in gene sets...
+c2 <- GSEABase::getGmt(here::here("analysis/supporting_data/c2.cp.v2022.1.Hs.symbols.gmt"))
+
+# run camera...
+gsea.res <- lapply(
+  de.results[c("basal", "suprabasal", "intermediate", "secretory I", "secretory II")],
+  function(x) {
+    # pass addtional options for camera here...
+    # intermediate data from pseudobulkDGE stored inside @metadata for each list element,
+    # where `y` is the DGEList obj
+    camera.DGEList(x@metadata$y, GSEABase::geneIds(c2))
+  }
+)
+
+gsea.res.df <- do.call(rbind, gsea.res) %>%
+  mutate(
+    spl = str_split(rownames(.), "\\."),
+    cluster = purrr::map_chr(spl, 1) %>% factor(levels = levels(hae.combined$cluster_pretty)),
+    gene_set = purrr::map_chr(spl, 2),
+    direction = if_else(Direction == "Up", 1, -1), # as integer
+  ) %>%
+  as_tibble() %>%
+  select(-spl)
+gsea.res.df[is.na(gsea.res.df)] <- NA_real_
+
+gsea.c2.sum <- gsea.res.df %>%
+  filter(FDR < 0.05, cluster %in% sel.clust) %>%
+  group_by(gene_set, Direction) %>%
+  summarise(n = n(), clusters = str_c(cluster, collapse = "; ")) %>%
+  arrange(desc(n))
+```
+
+```{r c2cp_camera_top10, fig.height = 8, fig.width = 7}
+# select the top n gene sets by lowest FDR...
+n <- 30
+top.n.by.FDR <- gsea.res.df %>%
+  arrange(FDR) %>%
+  pull(gene_set) %>%
+  unique() %>%
+  head(n)
+
+to.plot <- gsea.res.df %>%
+  filter(
+    cluster %in% sel.clust,
+    gene_set %in% top.n.by.FDR
+  ) %>%
+  mutate(
+    PValue = if_else(PValue < 0.05, PValue, NA_real_)
+  )
+
+gene.set.order <- gsea.res.df %>%
+  filter(
+    cluster %in% sel.clust,
+    gene_set %in% top.n.by.FDR
+  ) %>%
+  group_by(gene_set) %>%
+  slice_min(n = 1, order_by = PValue) %>%
+  mutate(
+    dir_p = -direction * log10(PValue)
+  ) %>%
+  arrange(dir_p) %>%
+  pull(gene_set)
+
+# plot...
+# add a header row that will be filled in illustrator with group colors...
+camera_hm_vgg <- ggplot(
+  to.plot,
+  aes(cluster, gene_set, fill = direction * -log10(PValue))
+) +
+  geom_tile() +
+  geom_tile(aes(fill = NA_real_, y = n + 1), color = "grey30", size = 1) +
+  scale_fill_distiller(
+    type = "div",
+    oob = scales::oob_squish,
+    limits = c(-15, 15),
+    guide = guide_colorbar(order = 1, title = expression("Direction x log"[10] * "(p)"), barwidth = 10, barheight = 1.4),
+    na.value = "grey30"
+  ) +
+  scale_x_discrete(
+    position = "top",
+    labels = sel.clust
+  ) +
+  scale_y_discrete(
+    limits = gene.set.order,
+    labels = gsea_labeller_fxn(gene.set.order, l = 50),
+    position = "left"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x.top = element_text(angle = 45, vjust = 0.0, hjust = 0.00),
+    text = element_text(size = 16),
+    legend.position = "bottom",
+    legend.justification = "right",
+    plot.margin = unit(c(5, 50, 5, 5), "pt"),
+    panel.border = element_rect(color = "black", size = 1, fill = NA),
+    axis.line.y.right = element_line()
+  ) +
+  labs(x = NULL, y = NULL)
+
+ggsave(
+  plot = camera_hm_vgg,
+  filename = "../figures/Figure03F.pdf",
+  height = 8,
+  width = 7
+)
+
+camera_hm_vgg
+```
+
+## Supplemental materials. 
+
+### Figure S2A. UMAP plots by replicate
+
+```{r umap2, fig.height=4, fig.width = 15}
+# UMAP coloring by cluster annotation
+Idents(hae.combined) <- "cluster_pretty"
+p_umap_e1 <- DimPlot(
+  hae.combined,
+  reduction = "umap",
+  label.size = 4,
+  pt.size = 0.3,
+  label.box = F,
+  label = F,
+  split.by = "SampleID"
+) &
+  coord_fixed() &
+  scale_color_d3(palette = "category20", alpha = 0.8)
+p_umap_e1 <- p_umap_e1 &
+  theme(
+    text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 20),
+    legend.position = "right",
+    legend.background = element_blank(),
+    panel.border = element_blank(),
+    axis.line.y = element_line(arrow = grid::arrow(length = unit(0.2, "cm"), ends = "last")),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    axis.line.x = element_line(arrow = grid::arrow(length = unit(0.2, "cm"), ends = "last"))
+  ) &
+  labs(
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+
+ggsave(
+  plot = p_umap_e1,
+  filename = "../figures/figureS02A.pdf",
+  height = 4,
+  width = 15,
+)
+
+p_umap_e1
+```
+
+### Figure S2B. Large differential expression heatmap -- Marker genes by cell type 
+
+```{r, fig.height = 10, fig.width = 7}
+# a new design matrix with cell types included...
+# another alternative would be to perform a one-way ANOVA type test with:
+# `glmQLFTest(fit, coef = 2:10)`, where the design matrix contains group assignments
+# and our first cell type is the intercept, or reference level. However, this is performing
+# a pairwise comparison instead of against the average of all groups, which is what this contrast
+# achieves.
+
+marker.design <- model.matrix(~ 0 + cluster_minor + SampleGroup, colData(hae.se))
+colnames(marker.design) <- c(levels(hae.se$cluster_minor), "BCi") %>%
+  str_replace(" ", ".") %>%
+  str_replace("-", ".")
+
+# drop cell types missing from pseudobulks...
+marker.design <- marker.design[, c(1:9, 11, 13)]
+
+### For determining celltype markers, contrast
+## each celltype with the AVERAGE of all other cell types
+## Celltype 'marker genes' are the baseline contrast (t = 0)
+celltype <- colnames(marker.design)[1:10]
+
+contrasts_celltype_markers <- lapply(celltype, function(x) {
+  other <- celltype[celltype != x] # get cell types other than self, x
+  # Build strings for each contrast and run through makecontrasts()
+  contrast_string <- paste0(x, paste0(" - (", paste(other, collapse = "+"), ")/", length(other)))
+  cmd <- paste(
+    "contrast <- makeContrasts(", contrast_string, ", levels = marker.design)",
+    sep = '"'
+  )
+  return(eval(parse(text = cmd)))
+})
+
+## Combine all celltype contrasts
+mat_contrasts_celltype_markers <- do.call(cbind, contrasts_celltype_markers)
+
+# Set column names
+colnames(mat_contrasts_celltype_markers) <- paste0(
+  "celltype_",
+  gsub(colnames(mat_contrasts_celltype_markers),
+    pattern = " - ", replacement = "_V_"
+  )
+)
+
+# Set significance cutoffs
+logFC_threshold <- 2
+FDR_threshold <- 0.05
+
+# Run edgeR fit
+fit <- run_standard_edgeR_fit(
+  counts = counts(hae.se),
+  group = hae.se$cluster_minor,
+  design = marker.design
+)
+
+contrasts_celltype_markers <- colnames(mat_contrasts_celltype_markers)
+res_list_celltype_markers <- lapply(
+  contrasts_celltype_markers, function(x) {
+    res <- glmQLFTest(fit, contrast = mat_contrasts_celltype_markers[, x])
+    df_res <- topTags(res, n = Inf) %>%
+      as.data.frame() %>%
+      # Apply significance filters
+      filter(FDR < FDR_threshold) %>%
+      filter(logFC > logFC_threshold) # Only positive logFC for markers
+    df_res <- cbind("gene" = rownames(df_res), df_res)
+    return(df_res)
+  }
+)
+names(res_list_celltype_markers) <- celltype
+
+sel.genes <- do.call(rbind, res_list_celltype_markers) %>%
+  pull(gene) %>%
+  unique()
+
+de.vsd <- assay(vsd)[sel.genes, ]
+de.vsd.scaled <- t(scale(t(de.vsd)))
+
+col.order <- colnames(de.vsd)
+
+cell_cols <- ggsci::pal_d3(palette = "category20")(12)
+names(cell_cols) <- levels(hae.sce$cluster_pretty)
+
+column_ha <- HeatmapAnnotation(
+  `Cell type` = str_split(col.order, "-") %>% map_chr(2),
+  Group = str_split(col.order, "_") %>% map_chr(1),
+  col = list(
+    Group = c(
+      "BCi" = group_cols[2],
+      "primary" = group_cols[1]
+    ),
+    `Cell type` = cell_cols
+  ),
+  annotation_legend_param = list(
+    `Cell type` = list(
+      labels = levels(hae.sce$cluster_pretty),
+      at = levels(hae.sce$cluster_pretty)
+    )
+  )
+)
+
+cmap <- circlize::colorRamp2(c(-4, 0, 4), colors = c("#177a72", "white", "#874e0a"))
+
+pdf(file = "../figures/FigureS02B.pdf", width = 7, height = 10)
+
+ht <- ComplexHeatmap::Heatmap(
+  de.vsd.scaled,
+  name = "z-score",
+  column_split = vsd[unique(diff.exp.df$gene), ]$cluster_pretty,
+  cluster_columns = F,
+  cluster_rows = T,
+  show_column_names = F,
+  show_row_names = F,
+  top_annotation = column_ha,
+  show_row_dend = F,
+  column_title = NULL
+)
+
+draw(ht, merge_legend = T)
+dev.off()
+
+write_xlsx(res_list_celltype_markers,
+  path = here::here("analysis/data/celltype_markers.xlsx"),
+  col_names = TRUE
+)
+
+draw(ht, merge_legend = T)
+```
+
+### Figure S3A. Violin plots of *TERT*, selected ISG expression
+
+```{r}
+anno.df <- big.de.results.joined %>%
+  filter(
+    gene %in% c("IFIT1", "ISG15", "MX1", "TERT"),
+    FDR < 0.05,
+    logFC > 1,
+    prop.detected > 0.1
+  )
+anno.df <- anno.df %>%
+  mutate(
+    y_position = case_when(
+      gene == "TERT" ~ 2,
+      gene == "ISG15" ~ 4.5,
+      gene == "MX1" ~ 4.5,
+      gene == "IFIT1" ~ 3.5
+    ),
+    xmin = "BCi_2",
+    xmax = "primary_2",
+    SampleGroup = NA,
+    SampleID = NA,
+    annotations = paste("FDR = ", signif(FDR, digits = 1)),
+  )
+```
+
+```{r, fig.width = 12, fig.height = 7}
+sel.genes <- c("IFIT1", "ISG15", "MX1", "TERT")
+sel.clust <- levels(hae.combined$cluster_pretty)[c(1, 3:6)]
+
+isg.dat <- FetchData(
+  object = hae.combined,
+  vars = c(
+    "cluster_pretty",
+    "SampleID",
+    "SampleGroup",
+    sel.genes
+  ),
+  slot = "data"
+) %>%
+  mutate(
+    cluster = cluster_pretty
+  ) %>%
+  pivot_longer(
+    sel.genes,
+    names_to = "gene",
+    values_to = "expression"
+  )
+
+# violins by clust
+isg.violins.2 <- ggplot(
+  isg.dat %>% filter(cluster %in% sel.clust),
+  aes(x = SampleID, y = expression, fill = SampleGroup)
+) +
+  geom_violin(draw_quantiles = 0.5, color = "black", scale = "width") +
+  geom_signif(
+    data = anno.df %>% filter(gene %in% sel.genes),
+    aes(
+      annotations = annotations,
+      y_position = y_position,
+      xmin = xmin,
+      xmax = xmax
+    ),
+    textsize = 4,
+    manual = T,
+    tip_length = 0.03,
+    vjust = -0.3
+  ) +
+  facet_grid(gene ~ cluster, scales = "free") +
+  theme_classic() +
+  theme(
+    text = element_text(size = 16),
+    aspect.ratio = 1,
+    legend.position = "right",
+    strip.text = element_text(face = "bold"),
+    axis.text.x.bottom = element_text(angle = 45, hjust = 1., vjust = 1.),
+    plot.background = element_rect(size = 1)
+  ) +
+  labs(x = NULL, y = "Log-normalized expression") +
+  guides(fill = F) +
+  scale_fill_manual(values = rev(group_cols))
+
+ggsave(
+  plot = isg.violins.2,
+  filename = "../figures/FigureS03A.pdf",
+  height = 7,
+  width = 12
+)
+
+isg.violins.2
+```
+
+### Figure S3B. IFN alpha response scores by at single cell level
+
+```{r}
+# read in gene sets...
+hallmark <- GSEABase::getGmt(here::here("analysis/supporting_data/h.all.v7.5.1.symbols.gmt"))
+
+# adding module scores for ISG sets...
+sel.sets <- c(
+  "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE"
+)
+
+# AddModuleScore()...
+hae.combined <- AddModuleScore(
+  hae.combined,
+  features = GSEABase::geneIds(hallmark)[sel.sets[[1]]],
+  name = paste0(sel.sets[[1]], "_SCORE"),
+  assay = "RNA"
+)
+
+# AddModuleScore()...
+hae.combined <- AddModuleScore(
+  hae.combined,
+  features = GSEABase::geneIds(hallmark)[sel.sets[[2]]],
+  name = paste0(sel.sets[[2]], "_SCORE"),
+  assay = "RNA"
+)
+
+score.dat <- FetchData(
+  object = hae.combined,
+  vars = c(
+    "UMAP_1",
+    "UMAP_2",
+    "cluster_minor",
+    "cluster_major",
+    "cluster_pretty",
+    "SampleID",
+    "SampleGroup",
+    "HALLMARK_INTERFERON_ALPHA_RESPONSE_SCORE1",
+    "HALLMARK_INTERFERON_GAMMA_RESPONSE_SCORE1"
+  )
+)
+```
+
+```{r, fig.width = 6, fig.height = 6}
+# violins by clust
+isg.violins <- ggplot(
+  score.dat %>% filter(cluster_minor %in% c("basal", "suprabasal", "intermediate", "secretory 1", "secretory 2", "secretory 3", "deuterosomal", "ciliated", "ionocyte")),
+  aes(x = SampleID, y = HALLMARK_INTERFERON_ALPHA_RESPONSE_SCORE1, fill = SampleGroup)
+) +
+  geom_violin(draw_quantiles = 0.5, scale = "width") +
+  facet_wrap(~cluster_pretty, scales = "fixed", nrow = 3) +
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    strip.text.x = element_text(face = "bold"),
+    plot.background = element_rect(size = 1),
+    text = element_text(size = 16)
+  ) +
+  labs(y = "Hallmark IFN Alpha Response Score", x = NULL) +
+  scale_fill_manual(values = group_cols) +
+  guides(fill = F)
+
+ggsave(
+  plot = isg.violins,
+  filename = "../figures/FigureS3B.pdf",
+  height = 6,
+  width = 6
+)
+
+isg.violins
+```
+
+## References

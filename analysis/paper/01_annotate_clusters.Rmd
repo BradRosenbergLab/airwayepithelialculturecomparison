@@ -1,0 +1,484 @@
+---
+title: "Comparison of primary and immortalized well-differentiated human airway epithelium cultures at air-liquid interface by single cell RNA-Sequencing"
+subtitle: "Semi-supervised scRNA-Seq cluster annotation"
+author: 
+  - "Rachel A. Prescott"
+  - "Alec P. Pankow"
+  - "Maren de Vries"
+  - "Keaton Crosse"
+  - "Roosheel S. Patel"
+  - "Mark Alu"
+  - "Cindy Loomis"
+  - "Victor Torres"
+  - "Sergei Koralov"
+  - "Ellie Ivanova"
+  - "Meike Dittmann"
+  - "Brad R. Rosenberg"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_float: true
+    fig_caption: yes
+    df_print: paged
+    code_folding: hide
+    pandoc_args:
+    - --lua-filter=../templates/scholarly-metadata.lua
+    - --lua-filter=../templates/author-info-blocks.lua
+bibliography: references.bib
+link-citations: yes
+institute:
+- Sinai: Icahn School of Medicine at Mount Sinai, Department of Microbiology
+---
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(
+  collapse = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  results = "show", #
+  echo = TRUE,
+  eval = TRUE,
+  comment = "#>",
+  fig.path = "../figures/",
+  dpi = 300,
+  cache = F, # look into turning on
+  cache.lazy = FALSE
+)
+```
+
+```{r}
+# imports
+library(clustree)
+library(dplyr)
+library(future)
+library(ggplot2)
+library(ggsci)
+library(here)
+library(patchwork)
+library(RColorBrewer)
+library(readr)
+library(scDblFinder)
+library(sctransform)
+library(Seurat)
+library(SeuratObject)
+
+# import project functions
+source(here::here("R/functions.R"))
+
+# set random seed
+RNGseed <- 3
+
+hae.combined <- readRDS(here("analysis/data/00-integrated-by-sample.rds"))
+```
+
+## V. Cluster annotation 
+
+Next, I will annotate the cell types in the culture, guided strongly by previous work in the lab with scRNAseq of HAE culture systems as well as established markers [@Hewitt2021-yx]. 
+
+### QC metrics by cluster
+
+Before looking into marker genes, I want to inspect the distribution of gene counts, UMI counts, and mitochondrial 
+read content across the different clusters. 
+
+```{r init_qc_feature_plots, fig.height = 6, fig.width = 12}
+DefaultAssay(hae.combined) <- "RNA"
+
+sel.features <- c("nCount_RNA", "nFeature_RNA", "percent.mt")
+ncol <- length(sel.features)
+
+p1 <- FeaturePlot(
+  hae.combined,
+  features = sel.features, ncol = ncol, combine = T,
+) &
+  scale_color_viridis_c(option = "viridis")
+
+p2 <- VlnPlot(hae.combined, features = sel.features, pt.size = 0, ncol = ncol)
+
+p1 / p2
+```
+
+### Gene set scoring
+
+Using a stress response gene set defined in the following reference, 
+adapted here to match our genome reference [@OFlanagan2019-hc].
+
+```{r emt_stress_set_scoring, fig.height = 5, fig.width = 8, warning = T}
+# Stress gene set from O’Flanagan et al.
+OFLANAGAN_STRESS_geneset <- read.table(
+  file = here::here("analysis/supporting_data/Campbell_StressCoreGeneSet_renamed.txt"),
+  skip = 2
+)[, 1]
+OFLANAGAN_STRESS_geneset <- list(as.character(OFLANAGAN_STRESS_geneset))
+
+hae.combined <- AddModuleScore(
+  hae.combined,
+  features = OFLANAGAN_STRESS_geneset,
+  name = "stress_geneset_score",
+  assay = "RNA"
+)
+
+# HALLMARK EMT gene set
+HALLMARK_EMT_geneset <- read.table(
+  file = here::here("analysis/supporting_data/HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION.txt"),
+  skip = 2
+)[, 1]
+HALLMARK_EMT_geneset <- list(as.character(HALLMARK_EMT_geneset))
+
+hae.combined <- AddModuleScore(
+  hae.combined,
+  features = HALLMARK_EMT_geneset,
+  name = "HALLMARK_EMT_geneset_score",
+  assay = "RNA"
+)
+
+# Plot as features
+p1 <- FeaturePlot(
+  hae.combined,
+  features = c("stress_geneset_score1", "HALLMARK_EMT_geneset_score1")
+) &
+  scale_color_viridis_c(option = "viridis")
+
+p2 <- VlnPlot(
+  hae.combined,
+  ncol = 2,
+  pt.size = 0,
+  features = c("stress_geneset_score1", "HALLMARK_EMT_geneset_score1")
+) & ggtitle(NULL)
+
+p1 / p2
+```
+
+- Cluster 19 appears to have high percent MT gene content and low RNA detection. The stress / EMT scores are unremarkable.
+- Cluster 18 has low RNA detection and marginally high percent MT expression relative to it's larger cluster 0 neighbor. 
+
+For these reasons, clusters 18 and 19 will be removed from downstream analysis. 
+
+Additionally, NHBE (primaries) appear to have higher stress geneset scores than BCi-NS1 on average. 
+
+```{r, fig.width = 10}
+VlnPlot(
+  hae.combined,
+  group.by = "SampleID",
+  features = c("stress_geneset_score1", "HALLMARK_EMT_geneset_score1")
+)
+```
+
+```{r}
+score.dat <- FetchData(
+  hae.combined,
+  vars = c("SampleID", "SampleGroup", "HALLMARK_EMT_geneset_score1", "stress_geneset_score1")
+) %>% as_tibble(rownames = "cell_barcode")
+
+# simple t test...
+# SampleGroup has two levels...
+t.test(
+  HALLMARK_EMT_geneset_score1 ~ SampleGroup,
+  data = score.dat,
+  paired = F,
+  var.equal = F
+)
+```
+
+```{r}
+# simple t test...
+# SampleGroup has two levels...
+t.test(
+  stress_geneset_score1 ~ SampleGroup,
+  data = score.dat,
+  paired = F,
+  var.equal = F
+)
+```
+
+```{r}
+clusters_to_exclude <- c(18, 19)
+hae.combined <- subset(
+  hae.combined,
+  idents = clusters_to_exclude,
+  invert = TRUE
+)
+```
+
+### Clustree stability analysis
+
+Running `clustree` to display cluster stability at a range of resolutions.
+
+```{r, fig.height = 8, fig.width = 8, message = F, warning = F, results = F}
+## if clusters excluded, need to re-run dim. reduction and neighbor finding
+DefaultAssay(hae.combined) <- "integrated"
+# set num dimensions, run PCA
+ndims <- 30
+hae.combined <- Seurat::RunPCA(hae.combined, npcs = 80, verbose = FALSE)
+
+hae.combined <- RunUMAP(
+  hae.combined,
+  reduction = "pca",
+  dims = 1:ndims,
+  n.neighbors = 60,
+  seed.use = RNGseed,
+  min.dist = 0.3,
+  repulsion.strength = 1
+)
+
+hae.combined <- FindNeighbors(hae.combined, reduction = "pca", dims = 1:ndims, k.param = 20)
+
+# find clusters for range of resolutions
+hae.combined <- FindClusters(
+  hae.combined,
+  resolution = seq(from = 0.2, to = 3, by = 0.2),
+  algorithm = 2,
+  random.seed = RNGseed
+)
+```
+
+```{r clustree, fig.height = 12, fig.width = 8}
+clustree(hae.combined, prefix = "integrated_snn_res.")
+```
+
+
+### Comparison of low (0.2) and medium-high (1.4) cluster resolution
+
+```{r post_qc_integrated_umap, fig.height = 5, fig.width = 12}
+p2 <- DimPlot(hae.combined, reduction = "umap", label = T, group.by = c("integrated_snn_res.0.2", "integrated_snn_res.1.4")) & NoLegend()
+Idents(hae.combined) <- "integrated_snn_res.1.4"
+p2
+```
+
+### Label transfer
+
+Labels were transferred using the Carraro et al. 2020 reference and the air-liquid interface dataset (ALI) [@Carraro2020-gr]. 
+
+```{r load_hae_references}
+source(here::here("R/label_transfer.R"))
+source(here::here("R/prep_hae_references.R"))
+```
+
+```{r}
+## carraro datasets
+for (x in names(carraro_datasets)) {
+  hae.combined <- label_transfer_seurat(
+    seurat = hae.combined, reference = carraro_datasets[[x]],
+    query_assay = "integrated", ref_assay = "integrated", norm_method = "SCT",
+    labels = "major", name = x
+  )
+}
+```
+
+A comparison of score predictions for the ALI vs. hBE Carraro et al. datasets. They largely agree in their predictions, but find a different basal/secretory boundary and score ciliated/deuterosomal cells somewhat differently. The ALI system matches the differentiation conditions for our experiment, so we will proceed with those score preditions. 
+
+```{r, fig.width = 10, fig.height = 6}
+p <- DimPlot(hae.combined, group.by = c("carraro_ALI_predicted.id", "carraro_hBE_predicted.id"), shuffle = TRUE) &
+  theme(legend.position = "bottom")
+p
+```
+
+Coloring the cluster resolution tree by majority predicted ID. A cluster resolution of 1.4 appears the most stable across all component cell types. 
+
+```{r clustree_anno, fig.height = 12, fig.width = 10}
+mostCommon <- function(x) {
+  names(sort(table(x), decreasing = T))[[1]]
+}
+clustree(
+  hae.combined,
+  prefix = "integrated_snn_res.",
+  node_colour = "carraro_ALI_predicted.id",
+  node_colour_aggr = "mostCommon",
+  show_axis = TRUE
+)
+```
+
+```{r}
+Idents(hae.combined) <- "integrated_snn_res.1.4"
+res <- "integrated_snn_res.1.4"
+hae.combined <- assign_major_group(hae.combined, "carraro_ALI_predicted.id", clusters = res)
+```
+
+```{r, fig.width = 10, fig.height = 5}
+# plot label transfer...
+DimPlot(hae.combined, label = T, group.by = c("group_major", res)) + NoLegend()
+```
+
+### Tabulate cells
+
+There are `r format(ncol(hae.combined), big.mark = ",")` cells in the remaining dataset. Here is the breakdown by sample:
+
+```{r}
+hae.combined@meta.data %>%
+  group_by(SampleID) %>%
+  summarise(n = n()) %>%
+  mutate(per = prop.table(n))
+```
+
+### Proliferating cells
+
+Clusters 12, 13, and 17 correspond to proliferating cells, but do not exactly segregate by S and G2/M.  
+
+```{r proliferating_scores, fig.height = 5, fig.width = 8}
+# Plot as features
+p1 <- FeaturePlot(
+  hae.combined,
+  features = c("S.Score", "G2M.Score"),
+  slot = "counts",
+  ncol = 1
+) &
+  scale_color_viridis_c(option = "viridis")
+
+p2 <- VlnPlot(hae.combined, features = c("S.Score", "G2M.Score"), pt.size = 0, ncol = 1)
+
+p1 | p2 | plot_layout(widths = c(1, 2))
+```
+
+```{r}
+DefaultAssay(hae.combined) <- "RNA"
+# scale RNA slot
+hae.combined <- ScaleData(hae.combined)
+```
+
+### The cellular landscape of the human respiratory epithelium
+
+From a recent review and a series of scRNA-seq studies of the respiratory epithelium since 2019, 
+the general cellular landscape is fairly well characterized [@Hewitt2021-yx]. I expect to see a combination of the following cell types present:
+
+| Cell type             | Marker genes                     | Function                                                       |
+| --------------------- | -------------------------------- | -------------------------------------------------------------- |
+| Basal                 | KRT5+, KRT14+, TP63+             | Epithelial stem cells                                          |
+| Suprabasal            | TP63 low, KRT5+, NOTCH3+         | Basal cell primed to differentiate; lies above basal cell layer|
+| Secretory             | SCGB1A1+, MUC5AC+                | Secrete mucus and antimicrobial peptides                       |
+| Ciliated              | FOXJ1+, CAPS+                    | Clear mucus                                                    |
+| Deuterosomal          | DEUP1+, FOXJ1+                   | Precursor to ciliated cells                                    |
+| Ionocyte              | CFTR+, ASCL1+, FOXI1+            | Participate in ion transport and pH regulation                 |
+| Neuroendocrine (PNEC) | ASCL1+, HOXB5+                   | Sensory cell responsive to O2 levels among other stimuli       |
+| Tuft (brush)          | POU2F3+, LRMP+                   | Sensory cell involved in taste and immune-related functions    |
+| Hillock               | KRT13+ KRT4+, ECM1+, CLDN3+      | Rare transitional cell type between basal and secretory cells  |
+
+<!-- Converted using https://tabletomarkdown.com/ --> 
+
+The first four cell types here are abundant, while the others are more rare. Note that SCGB1A1 is the gene symbol for CCSP, the canonical marker for club (previously 'Clara') cells. 
+
+### Key cell type markers
+
+First, to get a general idea of the layout of the projection let's look at the following
+key marker genes for the expected abundant cell types:
+
+```{r known_marker_abundant, fig.height = 8, fig.width = 16}
+sel.features <- c("KRT5", "TP63", "SCGB1A1", "MUC5AC", "MUC5B", "CAPS")
+ncol <- length(sel.features)
+
+p1 <- FeaturePlot(
+  hae.combined,
+  features = sel.features, ncol = ncol, combine = T,
+) &
+  scale_color_viridis_c(option = "viridis") &
+  guides(color = guide_colorbar(title = "Expression Level", title.position = "top")) &
+  theme(
+    legend.position = "top",
+    legend.justification = 1,
+    plot.title = element_text(hjust = 0.5)
+  )
+
+p2 <- VlnPlot(hae.combined, features = sel.features, pt.size = 0, ncol = ncol) &
+  coord_flip()
+
+p1 / p2 / plot_layout(heights = c(1, 2))
+```
+
+KRT5+ expressing basal cells are easily identifiable in the projection with high expression in a number of clusters near the top of the projection and graded expression in others. SCGB1A1 (CCSP) expression is highest in clusters 0, 14, and 15 and at a high-intermediate level in others. Mucins MUC5AC and MUC5B are expressed in cluster 15 and 17 respectively. CAPS expression is obsevered especially in clusters 16 and 19. 
+
+###  Rare cell types: ionocyte, tuft, deuterosomal, PNEC
+
+The following plot highlights marker genes for the more rare cell types. 
+
+```{r known_marker_rare, fig.height = 10, fig.width = 10}
+sel.features <- c("CFTR", "LRMP", "DEUP1", "ASCL1")
+
+p1 <- FeaturePlot(
+  hae.combined,
+  features = sel.features, ncol = 1, combine = T
+) &
+  scale_color_viridis_c(option = "viridis")
+
+p2 <- VlnPlot(hae.combined, features = sel.features, pt.size = 0, ncol = 1, combine = T)
+
+p1 | p2 | plot_layout(widths = c(1, 2))
+```
+
+CTFR expression, as seen in the heatmap, is present in a subpopulation of cluster 20. LRMP (a marker for Tuft cells) is expressed in cluster 21. These cells are thought to share a differentiation trajectory, so it is reasonable that they cluster near each other [@Goldfarbmuren2020-lb]. The intermediate DEUP1 expressing population is also present in clusters 18 and 19. Cluster 23 expresses the PNEC pioneering transcription factor ASCL1, along with HOXB5 and (not shown)
+
+### Cluster identification plot
+
+Based on expression of the above markers, major and minor clusters were assigned as follows. The major group label transfer appears to have incorrectly grouped neuroendocrine cells expressing known markers (ASCL1 / HOXB5) with ionocytes, while labeling the tuft-like cell cluster as neuroendocrine.
+
+```{r annotated_umap_major_cluster, fig.height = 6, fig.width = 12}
+hae.combined@meta.data <- hae.combined@meta.data %>%
+  mutate(
+    cluster_minor =
+      case_when(
+        integrated_snn_res.1.4 %in% c(1, 3, 7) ~ "basal",
+        integrated_snn_res.1.4 %in% c(12, 13, 17) ~ "basal proliferating",
+        integrated_snn_res.1.4 %in% c(8) ~ "suprabasal",
+        integrated_snn_res.1.4 %in% c(2, 5, 6, 22, 10) ~ "intermediate",
+        integrated_snn_res.1.4 %in% c(0, 4, 11, 9, 18) ~ "secretory 1",
+        integrated_snn_res.1.4 %in% c(14) ~ "secretory 2",
+        integrated_snn_res.1.4 %in% c(15) ~ "secretory 3",
+        integrated_snn_res.1.4 %in% c(19) ~ "deuterosomal",
+        integrated_snn_res.1.4 %in% c(16) ~ "ciliated",
+        integrated_snn_res.1.4 %in% c(21) ~ "tuft-like",
+        integrated_snn_res.1.4 %in% c(20) ~ "ionocyte",
+        integrated_snn_res.1.4 %in% c(23) ~ "neuroendocrine",
+        T ~ "other"
+      ),
+    cluster_major =
+      case_when(
+        group_major %in% c("NE") ~ "neuroendocrine",
+        group_major %in% c("FOXN4+") ~ "deuterosomal",
+        integrated_snn_res.1.4 %in% c(2, 5, 6, 22, 10) ~ "intermediate",
+        T ~ group_major
+      ) %>% tolower()
+  )
+
+# Set factor order in the metadata instead
+minor.cluster.ids <- c(
+  "basal",
+  "basal proliferating",
+  "suprabasal",
+  "intermediate",
+  "secretory 1",
+  "secretory 2",
+  "secretory 3",
+  "deuterosomal",
+  "ciliated",
+  "tuft-like",
+  "ionocyte",
+  "neuroendocrine"
+)
+hae.combined$cluster_minor <- factor(hae.combined$cluster_minor, levels = minor.cluster.ids)
+
+# Set factor order in the metadata instead
+major.cluster.ids <- c(
+  "basal",
+  "intermediate",
+  "secretory",
+  "deuterosomal",
+  "ciliated",
+  "ionocyte",
+  "neuroendocrine"
+)
+hae.combined$cluster_major <- factor(hae.combined$cluster_major, levels = major.cluster.ids)
+Idents(hae.combined) <- "cluster_major"
+
+# coloring by cluster annotation
+p1 <- DimPlot(
+  hae.combined,
+  group.by = c("cluster_major", "cluster_minor"),
+  reduction = "umap",
+  label = T,
+  repel = T
+) & NoLegend() & scale_color_d3(palette = "category20")
+p1
+```
+
+```{r}
+# save annotated dataset to file...
+saveRDS(hae.combined, file = here("analysis/data/01-integrated-by-sample-anno.rds"))
+```

@@ -1,0 +1,459 @@
+---
+title: "Comparison of primary and immortalized well-differentiated human airway epithelium cultures at air-liquid interface by single cell RNA-Sequencing"
+subtitle: "Quality control, pre-processing, and integration"
+author: 
+  - "Rachel A. Prescott"
+  - "Alec P. Pankow"
+  - "Maren de Vries"
+  - "Keaton Crosse"
+  - "Roosheel S. Patel"
+  - "Mark Alu"
+  - "Cindy Loomis"
+  - "Victor Torres"
+  - "Sergei Koralov"
+  - "Ellie Ivanova"
+  - "Meike Dittmann"
+  - "Brad R. Rosenberg"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_float: true
+    fig_caption: yes
+    df_print: paged
+    code_folding: hide
+    pandoc_args:
+    - --lua-filter=../templates/scholarly-metadata.lua
+    - --lua-filter=../templates/author-info-blocks.lua
+bibliography: references.bib
+link-citations: yes
+institute:
+- Sinai: Icahn School of Medicine at Mount Sinai, Department of Microbiology
+---
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(
+  collapse = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  results = "show", #
+  echo = TRUE,
+  eval = TRUE,
+  comment = "#>",
+  fig.path = "../figures/",
+  dpi = 300,
+  cache = F, # look into turning on
+  cache.lazy = FALSE
+)
+```
+
+## I. Objective
+
+To assess cellular heterogeneity and gene expression patterns across human airway epithelium cell cultures 
+(HAE) from primary normal human bronchial epithelium (NHBE) or an immortalized human
+bronchial epithelial cell line BCi-NS1 (abbreviated BCi) [@Walters2013-hy]. Each condition has three replicates, which in 
+the case of the BCi-NS1 cultures represent independent tissue culture differentiation of the
+commercially available cell line and for NHBE represent distinct donors. Samples were tagged with hashtag
+oligos, pooled, and processed together in one 10X scRNAseq library (with feature barcode detection). 
+
+Here are open ended question to guide the analysis:
+
+1. Are canonical cell types of the human respiratory epithelium represented in both NHBE and BCi-NS1? 
+2. Can we assess relative frequencies of canonical cell types across sample types?
+3. How distinct transcriptionally are the individual replicates for BCi-NS1 / NHBE with respect to each other? 
+
+```{r}
+# imports
+library(dplyr)
+library(future)
+library(ggplot2)
+library(glmGamPoi)
+library(here)
+library(patchwork)
+library(purrr)
+library(readr)
+library(scDblFinder)
+library(sctransform)
+library(Seurat)
+library(SeuratObject)
+library(stringr)
+library(tidyr)
+
+# import project functions
+source(here::here("R/functions.R"))
+
+# set random seed
+RNGseed <- 3
+```
+
+Before running the code chunk below download the barcodes, features, and matrix .tsv files from Gene Expression Omnibus 
+accession [GSE225765](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE225765). If the repository is still private, 
+please download interactively using your reviewer / private token, place in the "analysis/data/geo_downloads/GSE225765" directory, 
+and  use `bash/rename_GEO.sh` to rename files to expected Seurat inputs: `barcodes.tsv.gz`, `features.tsv.gz`, and `matrix.mtx.gz`.
+
+```{r}
+require(GEOquery)
+
+GEO_acc <- "GSE225765"
+data.dir <- here(paste0("analysis/data/geo_downloads/", GEO_acc))
+
+if (!dir.exists(data.dir)) {
+  dir.create(data.dir)
+}
+
+# download from GEO
+# NOTE: no command line access via a token is available while the repository is private
+# please download interactively and place in analysis/data/geo_downloads/GSE225765 dir.
+#getGEO(GEO = GEO_acc,
+#    destdir = data.dir
+#    )
+
+# rename files to match expected Seurat input...
+old_fh <- paste0(data.dir, "/GSE225765_barcodes.tsv.gz")
+if (file.exists(here(old_fh))) {
+  system(here("bash/rename_GEO.sh"))
+}
+```
+
+```{r}
+# read full path to 10X data
+hae.10X <- Seurat::Read10X(data.dir = data.dir)
+
+# Setup Seurat object
+hae.obj <- Seurat::CreateSeuratObject(counts = hae.10X$`Gene Expression`)
+
+# read in 10X metadata
+cellranger.meta <- read_csv(here("analysis/data/cellranger_0901_metrics_summary.csv"))
+```
+
+## II. 10X summary and sequencing statistics
+
+The following section summarizes quality statistics associated with the sequencing run and `cellranger` pipeline. 
+
+- `Single Cell 5' R2-only` Chemistry
+- `GRCh38-2020-A` transcriptome
+- `cellranger-6.1.2` pipeline version
+
+### Read statistics
+
+```{r}
+cols <- c(
+  "Valid Barcodes",
+  "Sequencing Saturation",
+  "Q30 Bases in Barcode",
+  "Q30 Bases in RNA Read",
+  "Q30 Bases in UMI"
+)
+pivot_longer(cellranger.meta[cols], everything(), names_to = "metric")
+```
+
+### Mapping statistics
+
+```{r}
+cols <- c(
+  "Reads Mapped to Genome",
+  "Reads Mapped Confidently to Genome",
+  "Reads Mapped Confidently to Exonic Regions",
+  "Reads Mapped Confidently to Transcriptome"
+)
+pivot_longer(cellranger.meta[cols], everything(), names_to = "metric")
+```
+
+### Cell statistics 
+
+```{r}
+cols <- c(
+  "Estimated Number of Cells",
+  "Mean Reads per Cell",
+  "Median UMI Counts per Cell",
+  "Median Genes per Cell"
+)
+pivot_longer(cellranger.meta[cols], everything(), names_to = "metric")
+```
+
+All sequencing statistics fall within the acceptable ranges. `r as.numeric(cellranger.meta["Median Genes per Cell"])` is acceptable, though many cell doublets are included here.
+We are in the recomended range of 20-50k reads/cell.^[https://kb.10xgenomics.com/hc/en-us/articles/115002022743-What-is-the-recommended-sequencing-depth-for-Single-Cell-3-and-5-Gene-Expression-libraries-]
+
+## III. Preprocessing and demultiplexing
+
+Cell hashing was used to identify each sample and allow for 'super-loading' of 
+the Chromium controller.^[https://cite-seq.com/cell-hashing/] The following table lists the 
+cell hashes, their assigned sample, and barcode used in this experiment. 
+
+### Table. HTO lookup
+
+```{r, message=F, warning=F}
+hto_lookup <- read_csv(here("analysis/data/hto_lookup.csv"))
+barcodes <- read_csv(paste0(data.dir, "/feature_ref.csv.gz")) %>% select(-name)
+htos <- full_join(hto_lookup, barcodes, by = c("HTO" = "id")) %>% mutate(HTO = str_replace(HTO, "_", "-"))
+htos
+```
+
+### HTO classification frequencies
+
+```{r}
+# Add HTO assay
+hae.obj[["HTO"]] <- CreateAssayObject(counts = hae.10X$`Antibody Capture`)
+
+# Normalize HTO data, uses different "CLR" norm
+hae.obj <- NormalizeData(hae.obj, assay = "HTO", normalization.method = "CLR")
+
+# run demux
+hae.obj <- HTODemux(hae.obj, assay = "HTO", positive.quantile = 0.99)
+```
+
+```{r}
+# assign sample using hash.ID
+hae.obj$SampleID <- htos$Sample[match(hae.obj$hash.ID, htos$HTO)]
+
+# Set factor order in the metadata instead
+hae.obj$SampleID <- factor(hae.obj$SampleID, levels = sort(unique(hae.obj$SampleID)))
+
+# group samples by type
+hae.obj$SampleGroup <- as.factor(map_chr(str_split(hae.obj$SampleID, "_"), 1))
+
+# define percent.mt (mitochondrial genes)
+hae.obj[["percent.mt"]] <- PercentageFeatureSet(hae.obj, pattern = "^MT-")
+
+# Summary of demux
+knitr::kable(table(hae.obj$HTO_classification.global))
+```
+
+### Sample frequencies
+
+```{r}
+knitr::kable(table(hae.obj$SampleID))
+```
+
+### HTO distributions
+
+The default cutoffs for HTO demux seem to perform well. 
+
+```{r, fig.height = 6, fig.width = 10}
+# inspect demux, grouping cells based on the max HTO signal
+Idents(hae.obj) <- factor(
+  hae.obj$hash.ID,
+  levels = c("Negative", "Doublet", htos$HTO)
+)
+RidgePlot(
+  hae.obj,
+  assay = "HTO",
+  features = rownames(hae.obj[["HTO"]]),
+  ncol = 3
+)
+``` 
+
+### nFeature and mitochondrial QC cutoffs
+
+The `nFeature_RNA` distributions are right-skewed with more cells with high genes/umi counts. 
+Some of these cells are likely homotypic (HTO-wise) doublets but they could also be cell with naturally higher RNA expression. 
+The following plot diplays the cutoffs for `nFeature` (gene) and `percent.mt` (mitochondrial gene percentage) 
+An envelope of 1.2 standard deviations around the mean in the log domain was chosen for the gene detection cutoffs. 
+Also, I added a nCountRNA filter of 1.5 standard deviations around the mean in the log domain to exclude clear doublets and cells with poor RNA detection.
+
+```{r qc_cutoffs}
+# filtering to singlets before calulating QC cutoffs...
+hae.obj.singlet <- subset(hae.obj, HTO_classification.global == "Singlet")
+
+# nfeature cutoffs...
+mean_nfeature <- mean(log(hae.obj.singlet$nFeature_RNA))
+# using log-transformed counts to correct for skew
+sd_nfeature <- sd(log(hae.obj.singlet$nFeature_RNA))
+
+# nCount_RNA cutoffs...
+mean_nCountRNA <- mean(log(hae.obj.singlet$nCount_RNA))
+# using log-transformed counts to correct for skew
+sd_nCountRNA <- sd(log(hae.obj.singlet$nCount_RNA))
+
+p1 <- VlnPlot(hae.obj,
+  features = "nCount_RNA",
+  pt.size = 0
+) +
+  geom_hline(yintercept = exp((mean_nCountRNA + 1.5 * sd_nCountRNA)), color = "red") +
+  geom_hline(yintercept = exp((mean_nCountRNA - 1.5 * sd_nCountRNA)), color = "red") +
+  guides(fill = F)
+
+p2 <- VlnPlot(hae.obj,
+  features = "nFeature_RNA",
+  pt.size = 0
+) +
+  geom_hline(yintercept = exp((mean_nfeature + 1.2 * sd_nfeature)), color = "red") +
+  geom_hline(yintercept = exp((mean_nfeature - 1.2 * sd_nfeature)), color = "red") +
+  guides(fill = F)
+
+perc.mito.cutoff <- mean(hae.obj.singlet$percent.mt) + 1 * sd(hae.obj.singlet$percent.mt)
+
+p3 <- VlnPlot(hae.obj,
+  features = "percent.mt",
+  pt.size = 0
+) +
+  geom_hline(yintercept = perc.mito.cutoff, color = "red") +
+  guides(fill = F)
+
+p1 | p2 | p3
+```
+
+### Doublet detection with scDblFinder
+
+To identify and remove cell doublets with the same hash ID we use `scDblFinder()`. This approach simulates 
+doublets through merging transcriptomes and trains a classifier, resulting in a doublet score 
+(which can be interpreted as a probability). The tSNE plots below are constructed using the HTO assay 
+and highlight how scDblFinder can identifies both intra and inter hash doublets 
+(inter-hash doublets lie between the larger clusters, while intra-hash doublets are interspersed 
+with other cells bearing that hash ID). 
+
+```{r hto_tsne, fig.height = 4, fig.width = 14}
+# run scDoubletFinder()
+hae.obj <- detect_doublets(hae.obj, clusters = NULL, knownDoublets = hae.obj$hash.ID == "Doublet")
+
+# run tSNE embedding on HTO assay slot
+hae.obj <- run_tSNE_HTO(hae.obj, remove.negatives = TRUE)
+
+# new column with combined doublet detection (homo/heterotypic from HTO demultiplexing + scDblfinder)
+hae.obj$any_doublet <- hae.obj$hash.ID == "Doublet" | hae.obj$scDblFinder.class == "doublet"
+
+p1 <- DimPlot(hae.obj, reduction = "tsne", group.by = "scDblFinder.class")
+p2 <- FeaturePlot(hae.obj, reduction = "tsne", features = c("scDblFinder.score"))
+p3 <- DimPlot(hae.obj, reduction = "tsne", group.by = c("any_doublet"))
+
+p1 | p2 | p3
+```
+
+The described QC thresholds for nCountRNA (UMIs), nFeature (genes), % mitochondrial content and 
+predicted doublet status by sample hash ID and scDblFinder classification are applied here. 
+
+```{r}
+# run QC filtering...
+hae.obj.filt <- subset(
+  hae.obj,
+  subset =
+    nFeature_RNA > exp(mean_nfeature - 1.2 * sd_nfeature) &
+      nFeature_RNA < exp(mean_nfeature + 1.2 * sd_nfeature) &
+      nCount_RNA > exp(mean_nCountRNA - 1.5 * sd_nfeature) &
+      nCount_RNA < exp(mean_nCountRNA + 1.5 * sd_nfeature) &
+      percent.mt < perc.mito.cutoff &
+      any_doublet == F
+)
+```
+
+```{r}
+print(c("% MT cutoff:", perc.mito.cutoff))
+print(c("nFeature cutoff low:", exp(mean_nfeature - 1.2 * sd_nfeature)))
+print(c("nFeature cutoff high", exp(mean_nfeature + 1.2 * sd_nfeature)))
+print(c("UMI cutoff low:", exp(mean_nCountRNA - 1.5 * sd_nfeature)))
+print(c("UMI cutoff high:", exp(mean_nCountRNA + 1.5 * sd_nfeature)))
+```
+
+## IV. Normalization, batch effect correction, dimensionality reduction, and clustering
+
+Preliminary analyses revealed cell transcriptomes were clustering by culture type (BCi-NS1 vs. NHBE) 
+and also individual sample. Here we integrate across all sample IDs to correct for this effect and define clusters consistently across samples. 
+
+### Cell cycle scoring module
+
+Cell cycle score difference was regressed out of the normalized data,in order to 
+separate proliferating from non-proliferating cells but lessen distortion by cell cycle
+phase. 
+
+```{r}
+hae.obj.filt <- NormalizeData(hae.obj.filt)
+
+# From Seurat vignette:
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat. We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Run scoring
+hae.obj.filt <- CellCycleScoring(hae.obj.filt, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+
+# Alternate procedure calculating the difference between S and G2/M scores
+hae.obj.filt$CC.Difference <- hae.obj.filt$S.Score - hae.obj.filt$G2M.Score
+```
+
+### Data integration
+
+The following R code performs data integration (will run for several minutes with default workflow resources).
+
+```{r}
+# All negative and doublet cells have previously been filtered out
+# Splitting Seurat object by HTO assignment
+hae.obj.list <- SplitObject(hae.obj.filt, split.by = "HTO_classification")
+
+# apply norm independently to each elem of list...
+hae.obj.list <- lapply(X = hae.obj.list, FUN = function(x) {
+  x <- SCTransform(
+    x,
+    ncells = 5000,
+    variable.features.n = 3000,
+    assay = "RNA",
+    new.assay.name = "SCT",
+    verbose = F, vars.to.regress = c("CC.Difference", "percent.mt")
+  )
+})
+
+# features in common for integration
+int.features <- SelectIntegrationFeatures(object.list = hae.obj.list, nfeatures = 2000) # was 5000
+
+# run before integration
+hae.obj.list <- PrepSCTIntegration(object.list = hae.obj.list, anchor.features = int.features)
+
+# perform integration
+hae.anchors <- FindIntegrationAnchors(object.list = hae.obj.list, anchor.features = int.features, normalization.method = "SCT")
+
+# combine data into one obj again
+hae.combined <- IntegrateData(anchorset = hae.anchors, normalization.method = "SCT")
+
+# switching to integrated for cluster annotation
+DefaultAssay(hae.combined) <- "integrated"
+```
+
+### Dimensionality reduction and unbiased clustering
+
+The first 30 PCs were used for clustering to be well past the elbow point. I am choosing a rather coarse cluster
+resolution here but cluster stability analyses revealed the groupings are quite stable at higher resolution as well. 
+
+### Elbowplot
+
+```{r elbowplot}
+ndims <- 30
+hae.combined <- Seurat::RunPCA(hae.combined, npcs = 80, verbose = FALSE)
+p <- ElbowPlot(hae.combined, ndims = 80)
+p + geom_vline(xintercept = ndims, color = "red")
+```
+
+Calculating the UMAP projection for selected number of dimensions. The `n_neighbors` statistic was increases to favor 
+more global structure relationships for the purpose of visualization. A higher clustering resolution of 1.5 was chosen 
+to inspect for the presense of potential small, low-quality clusters that made it through initial QC filters. 
+
+```{r init_post-integration_umap, fig.height = 5, fig.width = 12}
+DefaultAssay(hae.combined) <- "integrated"
+hae.combined <- RunUMAP(
+  hae.combined,
+  reduction = "pca",
+  dims = 1:ndims,
+  n.neighbors = 60, # default 30
+  seed.use = RNGseed,
+  min.dist = 0.3, # default 0.3
+  repulsion.strength = 1 # default 1
+)
+
+hae.combined <- FindNeighbors(hae.combined, reduction = "pca", dims = 1:ndims, k.param = 20)
+
+# find clusters for range of resolutions
+hae.combined <- FindClusters(
+  hae.combined,
+  resolution = 1.5, # set cluster resolution for QC
+  algorithm = 2,
+  random.seed = RNGseed
+)
+
+p1 <- DimPlot(hae.combined, reduction = "umap", label = F, group.by = "SampleGroup")
+p2 <- DimPlot(hae.combined, reduction = "umap", label = T, group.by = "seurat_clusters") + NoLegend()
+p1 + p2
+```
+
+```{r}
+# Save integrated object
+saveRDS(hae.combined, here("analysis/data/00-integrated-by-sample.rds"))
+```
