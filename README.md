@@ -20,7 +20,7 @@ This repository contains the data and code for our paper:
 
 Our pre-print is online here:
 
-> Rachel A. Prescott, Alec P. Pankow, Maren de Vries... Meike Dittmann, Brad R. Rosenberg , (2023). _A comparative study of in vitro air-liquid interface culture models of the human airway epithelium evaluating cellular heterogeneity and gene expression at single cell resolution_. BioRxiv [pending], Accessed 2023-02-10. Online at <https://doi.org/xxx/xxx>
+> Rachel A. Prescott, Alec P. Pankow, Maren de Vries... Meike Dittmann, Brad R. Rosenberg , (2023). _A comparative study of in vitro air-liquid interface culture models of the human airway epithelium evaluating cellular heterogeneity and gene expression at single cell resolution_. BioRxiv, Accessed 2023-02-28. Online at <https://doi.org/10.1101/2023.02.27.530299>
 
 ## Contents
 
